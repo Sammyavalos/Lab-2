@@ -1,0 +1,202 @@
+# CHEM 124 Lab 2
+# Protein concentration in whole milk and almond milk
+
+# Standards and milk readings ---------------------------------------------
+
+# Enter repeat HEX readings together in c(...) if available.
+standard_hex <- list(
+  `1` = "#7C8060",
+  `2` = "#777B5B",
+  `3` = "#747858",
+  `4` = "#72765A",
+  `5` = "#6F7255"
+)
+
+milk_hex <- list(
+  "Whole milk"  = c("#747734", "#6E7231", "#4B6647"),
+  "Almond milk" = c("#817B33", "#85772A", "#71702E")
+)
+
+milk_volume <- c("Whole milk" = 0.40, "Almond milk" = 3.59)
+final_volume <- 5.00
+dilution_factor <- final_volume / milk_volume[names(milk_hex)]
+
+# Calibration by color channel --------------------------------------------
+
+standard_rgb <- lapply(standard_hex, col2rgb)
+
+calibration <- data.frame(
+  concentration = as.numeric(names(standard_hex)),
+  t(sapply(standard_rgb, rowMeans)),
+  green_sd = sapply(standard_rgb, function(rgb) sd(rgb["green", ]))
+)
+
+channels <- c("red", "green", "blue")
+fits <- setNames(lapply(channels, function(channel) {
+  lm(reformulate("concentration", response = channel), data = calibration)
+}), channels)
+
+r_squared <- sapply(fits, function(fit) summary(fit)$r.squared)
+green_fit <- fits[["green"]]
+intercept <- coef(green_fit)[[1]]
+slope <- coef(green_fit)[[2]]
+standard_range <- range(calibration$concentration)
+
+equation <- c(
+  sprintf("G = %.2f %s %.2f C", intercept,
+          if (slope < 0) "-" else "+", abs(slope)),
+  sprintf("R\u00b2 = %.4f", r_squared[["green"]])
+)
+
+# These intervals describe the fitted mean at each standard concentration.
+fit_ci <- predict(green_fit, interval = "confidence", level = 0.95)
+
+print(calibration, row.names = FALSE)
+print(round(r_squared, 4))
+
+# Protein estimates from the green channel --------------------------------
+
+milk_green <- lapply(milk_hex, function(hex) col2rgb(hex)["green", ])
+mean_green <- sapply(milk_green, mean)
+milk_sd <- sapply(milk_green, sd)
+
+diluted_protein <- (mean_green - intercept) / slope
+original_protein <- diluted_protein * dilution_factor
+
+outside_range <- diluted_protein < standard_range[1] |
+  diluted_protein > standard_range[2]
+estimate_type <- ifelse(outside_range, "Extrapolated", "Interpolated")
+
+results <- data.frame(
+  sample = names(milk_hex),
+  mean_green = round(mean_green, 2),
+  green_sd = round(milk_sd, 2),
+  diluted_mg_mL = round(diluted_protein, 2),
+  dilution_factor = round(dilution_factor, 3),
+  original_mg_mL = round(original_protein, 2),
+  estimate = estimate_type
+)
+
+print(milk_green)
+print(results, row.names = FALSE)
+
+# Calibration and milk sample figures -------------------------------------
+
+draw_bars <- function(x, lower, upper, color) {
+  cap <- 0.06
+  segments(x, lower, x, upper, col = color, lwd = 1.2)
+  segments(x - cap, lower, x + cap, lower, col = color, lwd = 1.2)
+  segments(x - cap, upper, x + cap, upper, col = color, lwd = 1.2)
+}
+
+plot_calibration <- function(sample = NULL) {
+  standard_x <- calibration$concentration
+  green <- calibration$green
+  standard_sd <- calibration$green_sd
+  has_sd <- is.finite(standard_sd)
+  
+  sample_x <- diluted_protein[sample]
+  sample_y <- mean_green[sample]
+  sample_sd <- milk_sd[sample]
+  
+  title <- "Casein-BSA Calibration"
+  x_label <- "Protein Standard Concentration (mg/mL)"
+  y_values <- c(green, green - standard_sd, green + standard_sd)
+  
+  if (is.null(sample)) {
+    y_values <- c(y_values, fit_ci[, "lwr"], fit_ci[, "upr"])
+  } else {
+    title <- paste("Protein Estimate for Diluted", tolower(sample))
+    x_label <- "Protein Concentration (mg/mL)"
+    y_values <- c(y_values, sample_y, sample_y - sample_sd, sample_y + sample_sd)
+  }
+  
+  x_limits <- range(c(standard_range, sample_x)) + c(-0.4, 0.4)
+  y_limits <- range(y_values, na.rm = TRUE) + c(-5, 9)
+  
+  plot(
+    standard_x, green, type = "n",
+    xlim = x_limits, ylim = y_limits, las = 1,
+    main = title, cex.main = 0.95,
+    xlab = x_label, ylab = "Green Channel Intensity (0-255)"
+  )
+  
+  if (is.null(sample)) {
+    draw_bars(standard_x, fit_ci[, "lwr"], fit_ci[, "upr"], "gray45")
+  } else {
+    rect(standard_range[1], y_limits[1], standard_range[2], y_limits[2],
+         col = "#E8F5E8", border = NA)
+  }
+  
+  lines(standard_range, intercept + slope * standard_range,
+        col = "darkgreen", lwd = 2)
+  
+  # Draw standard SD bars wherever repeat readings are available.
+  if (any(has_sd)) {
+    draw_bars(
+      standard_x[has_sd],
+      green[has_sd] - standard_sd[has_sd],
+      green[has_sd] + standard_sd[has_sd],
+      "darkgreen"
+    )
+  }
+  
+  points(standard_x, green, pch = 19, col = "darkgreen")
+  legend("topright", equation, bty = "n", cex = 0.85,
+         text.col = "darkgreen")
+  
+  if (is.null(sample)) {
+    bar_labels <- "95% CI for fitted mean"
+    bar_colors <- "gray45"
+    if (any(has_sd)) {
+      bar_labels <- c(bar_labels, "Standard readings: \u00b11 SD")
+      bar_colors <- c(bar_colors, "darkgreen")
+    }
+    legend("bottomleft", bar_labels, bty = "n",
+           text.col = bar_colors, cex = 0.8)
+  } else {
+    if (outside_range[[sample]]) {
+      edge <- standard_range[which.min(abs(standard_range - sample_x))]
+      lines(c(edge, sample_x), c(intercept + slope * edge, sample_y),
+            col = "darkgreen", lwd = 2, lty = 2)
+    }
+    
+    segments(x_limits[1], sample_y, sample_x, sample_y,
+             col = "darkorange3", lty = 3)
+    segments(sample_x, y_limits[1], sample_x, sample_y,
+             col = "darkorange3", lty = 3)
+    
+    sample_label <- sprintf("%s estimate: %.2f mg/mL",
+                            estimate_type[[sample]], sample_x)
+    if (is.finite(sample_sd)) {
+      draw_bars(sample_x, sample_y - sample_sd, sample_y + sample_sd,
+                "darkorange3")
+      sample_label <- c(sample_label, "Orange bar: \u00b11 SD of green readings")
+    }
+    
+    points(sample_x, sample_y, pch = 18, col = "darkorange3", cex = 1.4)
+    legend("bottomleft", sample_label, bty = "n",
+           text.col = "darkorange3", cex = 0.8)
+  }
+}
+
+# Export the figures ------------------------------------------------------
+
+save_plot <- function(filename, sample = NULL) {
+  png(filename, width = 3.3, height = 2.8,
+      units = "in", res = 600, pointsize = 9)
+  on.exit(dev.off())
+  
+  par(mar = c(3.8, 3.8, 2.5, 0.8), mgp = c(2.3, 0.65, 0))
+  plot_calibration(sample)
+}
+
+output_folder <- path.expand("~/Downloads")
+
+save_plot(file.path(output_folder, "Figure_1_Calibration_Error_Bars.png"))
+save_plot(file.path(output_folder, "Figure_2_Whole_Milk_Error_Bars.png"),
+          "Whole milk")
+save_plot(file.path(output_folder, "Figure_3_Almond_Milk_Error_Bars.png"),
+          "Almond milk")
+
+cat("\nFigures saved to", output_folder, "\n")
